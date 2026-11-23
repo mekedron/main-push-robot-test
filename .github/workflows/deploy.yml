@@ -1,0 +1,27 @@
+# Stands in for wordpress-sites' deploy.yml: runs on a push to main and when
+# the robot workflow calls it.
+name: Deploy
+on:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      fail:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          REF: ${{ inputs.ref || github.sha }}
+          EVENT: ${{ github.event_name }}
+          FAIL: ${{ inputs.fail }}
+        run: |
+          echo "DEPLOY of $REF, event $EVENT"
+          if [ "$FAIL" = true ]; then echo "::error::forced deploy failure"; exit 1; fi

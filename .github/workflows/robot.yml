@@ -1,0 +1,98 @@
+# Stands in for wordpress-sites' update.yml and release.yml: commits to main
+# with the deploy key, deploys, and reverts when the deploy fails.
+name: Robot
+on:
+  workflow_dispatch:
+    inputs:
+      fail_deploy:
+        type: boolean
+        default: false
+      skip_ci:
+        description: false pushes without [skip ci], to show that a key push starts Deploy
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: commit-main
+  cancel-in-progress: false
+jobs:
+  token-push:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q --allow-empty -m "Workflow token push" -m "[skip ci]"
+          if git push -q origin HEAD:main; then echo "::error::the workflow token pushed to main"; exit 1; fi
+          echo "RESULT: the workflow token was refused at main"
+
+  update:
+    runs-on: ubuntu-24.04
+    environment: main-push
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.commit.outputs.ref }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - id: commit
+        env:
+          MAIN_PUSH_KEY: ${{ secrets.MAIN_PUSH_KEY }}
+          SKIP_CI: ${{ inputs.skip_ci }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "run $GITHUB_RUN_ID" >>stamp.txt
+          git add stamp.txt
+          if [ "$SKIP_CI" = true ]; then
+            git commit -q -m "Robot stamp" -m "Run $GITHUB_RUN_ID." -m "[skip ci]"
+            for attempt in 1 2 3; do
+              .github/scripts/push-main.sh && break
+              git pull -q --rebase origin main
+            done
+          else
+            git commit -q -m "Robot stamp without skip" -m "Run $GITHUB_RUN_ID."
+            d=$(mktemp -d); (umask 077; printf '%s\n' "$MAIN_PUSH_KEY" >"$d/key")
+            GIT_SSH_COMMAND="ssh -i $d/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$d/kh" \
+              git push -q "git@github.com:$GITHUB_REPOSITORY.git" HEAD:main
+          fi
+          git fetch -q origin main
+          if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo "::error::The commit did not reach main."
+            exit 1
+          fi
+          echo "RESULT: pushed $(git rev-parse HEAD) to main with the deploy key"
+          echo "ref=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+
+  deploy:
+    needs: update
+    uses: ./.github/workflows/deploy.yml
+    with:
+      ref: ${{ needs.update.outputs.ref }}
+      fail: ${{ inputs.fail_deploy }}
+
+  revert:
+    needs: [update, deploy]
+    if: failure() && needs.update.outputs.ref != ''
+    runs-on: ubuntu-24.04
+    environment: main-push
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
+      - env:
+          REF: ${{ needs.update.outputs.ref }}
+          MAIN_PUSH_KEY: ${{ secrets.MAIN_PUSH_KEY }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git revert --no-edit "$REF"
+          git commit -q --amend -m "Revert the robot stamp: the deploy failed" -m "Run $GITHUB_RUN_ID." -m "[skip ci]"
+          .github/scripts/push-main.sh
+          echo "RESULT: reverted $REF on main with the deploy key"
